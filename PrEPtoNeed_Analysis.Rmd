@@ -1,0 +1,196 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(MESS)
+library(ineq)
+```
+
+
+```{r}
+df <- read_delim("C:/Users/pcx5/Downloads/MER_Structured_Datasets_PSNU_FY19-21_20210212_v1_1/MER_Structured_Datasets_PSNU_FY19-21_20210212_v1_1.txt", 
+                 "\t", 
+                 escape_double = FALSE,
+                 trim_ws = TRUE,
+                 col_types = cols(.default = col_character(), 
+                                  targets = col_double(),
+                                  qtr1 = col_double(),
+                                  qtr2 = col_double(),
+                                  qtr3 = col_double(),
+                                  qtr4 = col_double(),
+                                  cumulative = col_double())
+) %>%
+  filter(indicator %in% c("HTS_TST_POS", "PrEP_NEW"))
+
+df <- pivot_longer(df,
+                   targets:cumulative,
+                   names_to = "period",
+                   values_to = "value")
+
+df <- unite(df, 
+            "period", 
+            c("fiscal_year", "period"),
+            sep = "_", 
+            remove = T)
+```
+
+# Global Gini
+```{r}
+df2 <- df %>% 
+  filter(period == "2020_cumulative") %>%
+  group_by(operatingunit, trendsfine, sex, indicator) %>%
+  summarise(total = sum(value, na.rm = T)) %>%
+  ungroup() %>%
+  spread(indicator, total) %>%
+  mutate(PrEP_NEW = replace_na(PrEP_NEW, 0)) %>%
+  #mutate(HTS_TST_POS = replace_na(HTS_TST_POS, 0)) %>%
+  filter(!is.na(HTS_TST_POS) | HTS_TST_POS != 0) %>%
+  mutate(ratio = PrEP_NEW/HTS_TST_POS) %>%
+  arrange(desc(ratio)) %>%
+  mutate(per_POS = HTS_TST_POS/sum(HTS_TST_POS),
+         per_PrEP = PrEP_NEW/sum(PrEP_NEW),
+         cum_POS = cumsum(per_POS),
+         cum_PrEP = cumsum(per_PrEP))
+df2
+```
+
+```{r}
+openxlsx::write.xlsx(df2,"ptn.xlsx")
+```
+
+
+```{r}
+df2 %>% 
+  group_by(operatingunit) %>% 
+  summarise(Avg.PNR = mean(ratio), 
+            HTS_POS = sum(HTS_TST_POS), 
+            PrEP_NEW = sum(PrEP_NEW)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x =  reorder(operatingunit, -Avg.PNR), y = Avg.PNR))  +
+  geom_col(fill = "red") + theme_minimal() +
+  ylab("Average PtN") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        legend.position =  "none",
+        axis.title.x = element_blank())
+```
+
+
+```{r}
+ggplot(df2, aes(x = cum_PrEP, y = cum_POS)) +
+  geom_line(color="lightblue", size=1) +
+  geom_abline(slope = 1, intercept = 0, color = "orange", size = 1, linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "FY2020 Cumulative PrEP-to-Need: Global",
+       subtitle = "Gini: 0.551") +
+  xlab("Cumulative % PrEP_New (OU ranked by PtN ratio)") +
+  ylab("Cumulative % HTS_POS")+ 
+  scale_x_continuous(labels = scales::percent) + 
+  scale_y_continuous(labels = scales::percent)
+
+```
+
+# Global Gini
+```{r}
+area <- auc(df2$cum_PrEP, df2$cum_POS)
+gap <- (0.5 - auc(df2$cum_PrEP, df2$cum_POS))
+gini <- gap/0.5
+gini
+```
+
+
+# Individual OUs
+```{r}
+ou_list <- unique((df %>% filter(indicator == "PrEP_NEW") %>% filter(period == "2018_cumulative") %>% group_by(operatingunit)%>% summarise(total = sum(value, na.rm = T)) %>% ungroup() %>% filter(total != 0))$operatingunit)
+
+ou_list <- unique((df %>% filter(indicator == "PrEP_NEW") %>% filter(period == "2020_cumulative") %>% group_by(operatingunit)%>% summarise(total = sum(value, na.rm = T)) %>% ungroup() %>% filter(total != 0))$operatingunit)
+
+gini_list20 <- list()
+
+container <- data.frame()
+
+for(ou in unique(ou_list)){
+  
+  df_hold <- df %>% 
+    filter(operatingunit == ou) %>%
+    filter(period == "2020_cumulative") %>%
+    group_by(snu1, trendsfine, sex, indicator) %>%
+    summarise(total = sum(value, na.rm = T)) %>%
+    ungroup() %>%
+    spread(indicator, total) %>%
+    filter(!is.na(HTS_TST_POS) | HTS_TST_POS != 0) %>%
+    mutate(PrEP_NEW = replace_na(PrEP_NEW, 0)) %>%
+    mutate(ratio = PrEP_NEW/HTS_TST_POS) %>%
+    arrange(desc(ratio)) %>%
+    mutate(per_POS = HTS_TST_POS/sum(HTS_TST_POS),
+           per_PrEP = PrEP_NEW/sum(PrEP_NEW),
+           cum_POS = cumsum(per_POS),
+           cum_PrEP = cumsum(per_PrEP)) %>%
+    mutate(operatingunit = ou)
+  
+  container <- bind_rows(container, df_hold)
+  
+  area <- auc(df_hold$cum_PrEP, df_hold$cum_POS)
+  gap <- (0.5 - auc(df_hold$cum_PrEP, df_hold$cum_POS))
+  gini <- gap/0.5
+  
+  gini_list20 <- append(gini_list20, list(ou, gini))
+  
+  ggplot(df_hold, aes(x = cum_PrEP, y = cum_POS)) +
+    geom_line(color="lightblue", size=2) +
+    geom_abline(slope = 1, intercept = 0, color = "orange", size = 2, linetype = "dashed") +
+    xlim(0, 1) + 
+    ylim(0, 1) + 
+    theme_minimal() +
+    labs(title = paste0("FY2018 Cumulative PrEP-to-Need: ", ou),
+         subtitle = paste0("Gini: ", round(gini,3))) +
+    xlab("Cumulative % PrEP_New (SNU ranked by PtN ratio)") +
+    ylab("Cumulative % HTS_POS")+ 
+    scale_x_continuous(labels = scales::percent) + 
+    scale_y_continuous(labels = scales::percent)
+  
+  ggsave(paste0(ou,"20.png"))
+}
+```
+
+```{r}
+openxlsx::write.xlsx(container, "PrEPtoNeed_Data.xlsx", asTable = T)
+```
+
+```{r}
+df %>% 
+  filter(operatingunit == "Democratic Republic of the Congo") %>%
+  filter(period == "2020_cumulative") %>%
+  group_by(snu1, trendsfine, sex, indicator) %>%
+  summarise(total = sum(value, na.rm = T)) %>%
+  ungroup() %>%
+  spread(indicator, total) %>%
+  #mutate(HTS_TST_POS = replace_na(HTS_TST_POS, 0)) %>%
+  filter(!is.na(HTS_TST_POS) | HTS_TST_POS != 0) %>%
+  mutate(PrEP_NEW = replace_na(PrEP_NEW, 0)) %>%
+  mutate(ratio = PrEP_NEW/HTS_TST_POS) %>%
+  arrange(desc(ratio)) %>%
+  mutate(per_POS = HTS_TST_POS/sum(HTS_TST_POS),
+         per_PrEP = PrEP_NEW/sum(PrEP_NEW),
+         cum_POS = cumsum(per_POS),
+         cum_PrEP = cumsum(per_PrEP)) %>%
+  mutate(operatingunit = ou) %>%
+  ggplot(aes(x = cum_PrEP, y = cum_POS)) +
+  geom_line(color="lightblue", size=2) +
+  geom_abline(slope = 1, intercept = 0, color = "orange", size = 2, linetype = "dashed") +
+  xlim(0, 1) + 
+  ylim(0, 1) + 
+  theme_minimal() +
+  labs(title = paste0("FY2020 Cumulative PrEP-to-Need: ", ou),
+       subtitle = paste0("Gini: ", round(gini,3))) +
+  xlab("Cumulative % PrEP_New (SNU ranked by PtN ratio)") +
+  ylab("Cumulative % HTS_POS")+ 
+  scale_x_continuous(labels = scales::percent) + 
+  scale_y_continuous(labels = scales::percent)
+```
+
+
