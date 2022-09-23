@@ -1,6 +1,6 @@
 library(tidyverse)
 
-df <- read_delim("C:/Users/pcx5/Downloads/Genie_PSNU_IM_MultipleOUs_Frozen_f79aede5-1db6-4019-b45c-27f823385571.zip",
+df <- read_delim("Genie_PSNU_IM_MultipleOUs_Frozen_f79aede5-1db6-4019-b45c-27f823385571.zip",
                  "\t",
                  escape_double = FALSE,
                  trim_ws = TRUE,
@@ -46,9 +46,9 @@ df2 <- df %>%
             approvallevel)) %>%
   group_by_if(is.character) %>%
   summarise(HTS_TST_POS = sum(HTS_TST_POS, na.rm = T),
-            PrEP_CURR      = sum(PrEP_CURR, na.rm = T),
-            PrEP_NEW       = sum(PrEP_NEW, na.rm = T),
-            PrEP_CT       = sum(PrEP_CT, na.rm = T)) %>%
+            PrEP_CURR   = sum(PrEP_CURR, na.rm = T),
+            PrEP_NEW    = sum(PrEP_NEW, na.rm = T),
+            PrEP_CT     = sum(PrEP_CT, na.rm = T)) %>%
   ungroup() %>%
   mutate(empty = HTS_TST_POS + PrEP_CURR + PrEP_NEW + PrEP_CT) %>%
   filter(empty != 0) %>%
