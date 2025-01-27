@@ -1,0 +1,414 @@
+---
+title: "PrEP Clusters"
+author: "Randy Yee (pcx5@cdc.gov)"
+date: "2025-01-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(janitor)
+library(factoextra)
+library(cluster)
+library(corrplot)
+
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+# Import and Assemble Subsets
+
+## Import the PSNUxIM dataset
+
+```{r}
+setwd("~/PrEP Country Clusters")
+Genie_PSNU_IM_Global_frozen_2025_01_13 <- read_delim("Genie-OU_IM-Global-frozen-2025-01-14.txt", 
+                                                     delim = "\t", escape_double = FALSE, 
+                                                     trim_ws = TRUE)
+```
+
+## Add a pop column then group by to remove all the unnecessary columns
+
+```{r}
+df <- Genie_PSNU_IM_Global_frozen_2025_01_13 %>%
+  filter(typemilitary == "N") %>%
+  mutate(population = case_when(standardizeddisaggregate == "Total Numerator" ~ "Total",
+                                is.na(ageasentered) & is.na(sex) ~otherdisaggregate_sub,
+                                TRUE ~paste0(ageasentered, "-", sex)))%>%
+  group_by(country, 
+           #snu1, snu1uid, 
+           fiscal_year,
+           indicator, standardizeddisaggregate, otherdisaggregate, otherdisaggregate_sub, ageasentered, population, sex) %>%
+  summarize(cumulative = sum(cumulative, na.rm =T),
+            target = sum(targets, na.rm = T)) %>%
+  ungroup()
+```
+
+## Achievement Subset
+ 
+```{r}
+df_achieve <- df %>%
+  filter(fiscal_year == 2024) %>%
+  #filter(standardizeddisaggregate!="Total Numerator") %>%
+  filter(target != 0) %>%
+  group_by(country, 
+           #snu1, snu1uid, 
+           indicator, population,
+           fiscal_year) %>%
+  summarize(cumulative = sum(cumulative, na.rm =T),
+            target = sum(target, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(achievement = cumulative/target) %>%
+  mutate(indicator = str_replace_all(indicator,"_","")) %>%
+  mutate(label = paste0(indicator, " Achievement", "_", population)) %>%
+  filter(indicator != "HTSTSTNEG") %>%
+  select(-c(cumulative, target, indicator, population, fiscal_year)) %>%
+  pivot_wider(names_from = label, values_from = achievement) %>%
+  filter(!is.na(`PrEPNEW Achievement_Total`))
+```
+ 
+## PrEP-to-Need and Coverage Subset
+ 
+```{r}
+df_ptn <- df %>%
+  filter(fiscal_year == 2024) %>%
+  filter(standardizeddisaggregate%in% c("Total Numerator",
+                                        "Modality/Age/Sex/Result", "Modality/Age Aggregated/Sex/Result", "KeyPop/Result",
+                                        "Age/Sex", "KeyPop", "KeyPopAbr")) %>%
+  select(country, 
+         #snu1, snu1uid, 
+         indicator, population, cumulative) %>%
+  pivot_wider(names_from = indicator, values_from = cumulative, values_fn = sum) %>%
+  mutate(PTN = (PrEP_NEW+PrEP_CT)/HTS_TST_POS,
+         `PrEP Coverage` = PrEP_NEW/HTS_TST_NEG) %>%
+  select(-c(PrEP_NEW, PrEP_CT, HTS_TST_POS, HTS_TST_NEG)) %>%
+  pivot_longer(PTN:`PrEP Coverage`, names_to = "label", values_to = "value") %>%
+  filter(!is.na(value) | value != Inf) %>%
+  mutate(label = paste0(label, "_", population)) %>%
+  select(-population) %>%
+  pivot_wider(names_from = label, values_from = value)
+```
+ 
+## PrEP Type Subset
+
+```{r}
+df_preptype <- df %>%
+  filter(fiscal_year == 2024) %>%
+  filter(indicator %in% c("PrEP_NEW", "PrEP_CT")) %>%
+  filter(standardizeddisaggregate=="Type") %>%
+  select(-target) %>%
+  pivot_wider(names_from = otherdisaggregate, values_from = cumulative, values_fn = sum) %>%
+  mutate(Total = rowSums(.[9:13], na.rm = T),
+        `Oral Type` =  `N/A, PrEP Type - Oral`/Total,
+        `Oral Type1` =  `PrEP Type - Oral`/Total,
+        `Other Type` = `PrEP Type - Other`/Total,
+        `Injectable Type` = `N/A, PrEP Type - Injectable`/Total,
+        `Injectable Type1` = `PrEP Type - Injectable`/Total,
+        ) %>%
+  pivot_longer(Total:`Injectable Type1`, names_to = "label", values_to = "value") %>%
+  filter(label != "Total") %>%
+  select(country, indicator, label, value) %>%
+  mutate(label = case_when(label == "Oral Type1" ~ "Oral Type",
+                           label == "Injectable Type1" ~ "Injectable Type",
+                           TRUE ~label)) %>%
+  mutate(indicator = str_replace_all(indicator,"_","")) %>%
+  unite("label", c(indicator, label), sep = " ") %>%
+  mutate(label = paste0(label, "_Total")) %>%
+  pivot_wider(names_from = label, values_from = value, values_fn = function(x) sum(x, na.rm = TRUE))
+```
+
+## PrEP_CT Result Subset
+
+```{r}
+df_ctresult <- df %>%
+  filter(fiscal_year == 2024) %>%
+  filter(standardizeddisaggregate == "TestResult") %>%
+  select(-target) %>%
+  pivot_wider(names_from = otherdisaggregate, values_from = cumulative) %>%
+  mutate(`PrEPCT Percent Positive_Total` = `PrEP Test Result - Positive`/sum(`PrEP Test Result - Positive`, `PrEP Test Result - Negative`, `PrEP Test Result - Other`, na.rm = T)) %>%
+  select(country, `PrEPCT Percent Positive_Total`)
+```
+
+## KP Proportion Subset
+
+```{r}
+df_kp <- df %>%
+  filter(fiscal_year == 2024) %>%
+  filter(indicator %in% c("PrEP_NEW", "PrEP_CT")) %>%
+  filter(population %in% c("Total", "MSM", "FSW", "TG", "PWID", "People in prisons and other enclosed settings")) %>%
+  group_by(country, indicator, population) %>%
+  summarize(cumulative = sum(cumulative, na.rm = T)) %>%
+  ungroup() %>%
+  pivot_wider(names_from = population, values_from = cumulative) %>%
+  mutate(`Percent_MSM` = MSM/Total,
+         `Percent_FSW` = FSW/Total,
+         `Percent_TG` = TG/Total,
+         `Percent_PWID` = PWID/Total,
+         `Percent_People in prisons and other enclosed settings` = `People in prisons and other enclosed settings`/Total) %>%
+  select(country, indicator, `Percent_MSM`:`Percent_People in prisons and other enclosed settings`) %>%
+  pivot_longer(`Percent_MSM`:`Percent_People in prisons and other enclosed settings`, names_to = "label", values_to = "value") %>%
+  mutate(indicator = str_replace_all(indicator,"_","")) %>%
+  unite("label", c(indicator, label), sep = " ") %>%
+  pivot_wider(names_from = label, values_from = value)
+
+df_kp[is.na(df_kp)] <- 0
+  
+```
+
+## HIV Positive Change Subset
+
+```{r}
+df_pos <- df %>%
+  filter(indicator == "HTS_TST_POS") %>%
+  select(country, fiscal_year, population, cumulative) %>%
+  pivot_wider(names_from = fiscal_year, values_from = cumulative, values_fn = function(x) sum(x, na.rm = TRUE)) %>% 
+  mutate(`Positive Change` = (`2024`-`2023`)/`2023`) %>%
+  # filter(!is.na(`Positive Change`)) %>%
+  mutate(population = paste0("Positive Change_", population)) %>%
+  select(-c(`2024`, `2023`)) %>%
+  pivot_wider(names_from = population, values_from = `Positive Change`)
+  #filter(!is.nan(Per_Pos) | !is.na(Per_Pos) | Per_Pos != Inf)
+```
+
+## Testing Yield Subset
+
+```{r}
+df_yield <- df %>%
+  filter(fiscal_year == 2024) %>%
+  filter(indicator %in% c("HTS_TST_POS", "HTS_TST_NEG")) %>%
+  select(country, indicator, population, cumulative) %>%
+  pivot_wider(names_from = indicator, values_from = cumulative, values_fn = function(x) sum(x, na.rm = TRUE)) %>%
+  mutate(Yield = HTS_TST_POS/(HTS_TST_POS + HTS_TST_NEG)) %>%
+  mutate(population = paste0("Yield_", population)) %>%
+  select(-c(HTS_TST_POS, HTS_TST_NEG)) %>%
+  pivot_wider(names_from = population, values_from = Yield)
+  #filter(!is.nan(Yield) | !is.na(Yield) | Yield != Inf)
+```
+
+TODO: Gini?
+
+## Merge Subsets
+
+```{r}
+df1 <- df_ptn %>%
+  left_join(df_achieve) %>%
+  left_join(df_preptype) %>%
+  left_join(df_ctresult) %>%
+  left_join(df_kp) %>%
+  left_join(df_pos) %>%
+  left_join(df_yield)
+```
+
+Remove any empty rows and columns
+
+```{r}
+df2 <- df1
+
+df2[df2 == 0] <- NA
+
+df2 <- df2 %>%
+  janitor::remove_empty("cols", cutoff = 0.9) # Higher
+```
+
+# Decision Tree 
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(caTools)
+```
+
+```{r}
+df_rf <- df1 %>%
+  pivot_longer(2:200, names_to = "label", values_to = "value") %>%
+  separate(label, into = c("indicator", "population"), sep = "_") %>%
+  pivot_wider(names_from = indicator, values_from = value)
+```
+
+```{r}
+df_rf <- df2 %>%
+  select(-c(50:65, 67:85))
+```
+
+```{r}
+set.seed(42)
+sample_split <- sample.split(Y = df_rf$`Positive Change_Total`, SplitRatio = 0.75)
+train_set <- subset(x = df_rf, sample_split == TRUE)
+test_set <- subset(x = df_rf, sample_split == FALSE)
+```
+
+```{r}
+model <- rpart(`Positive Change_Total` ~ ., data = train_set, method = "class")
+model
+```
+
+```{r}
+rpart.plot(model)
+```
+
+```{r}
+importances <- varImp(model)
+importances %>%
+  arrange(desc(Overall))
+```
+
+
+
+
+# Cluster
+
+```{r}
+test <- df2[complete.cases(df2)==T,]
+
+df_m <- test %>%
+  column_to_rownames("country")
+```
+
+## Correlation
+
+```{r}
+corr <- cor(df_m)
+corr
+```
+
+```{r}
+corr_simple <- function(data=df,sig=0.5){
+  #convert data to numeric in order to run correlations
+  #convert to factor first to keep the integrity of the data - each value will become a number rather than turn into NA
+  df_cor <- data %>% mutate_if(is.character, as.factor)
+  df_cor <- df_cor %>% mutate_if(is.factor, as.numeric)
+  #run a correlation and drop the insignificant ones
+  corr <- cor(df_cor)
+  #prepare to drop duplicates and correlations of 1     
+  corr[lower.tri(corr,diag=TRUE)] <- NA 
+  #drop perfect correlations
+  corr[corr == 1] <- NA 
+  #turn into a 3-column table
+  corr <- as.data.frame(as.table(corr))
+  #remove the NA values from above 
+  corr <- na.omit(corr) 
+  #select significant values  
+  corr <- subset(corr, abs(Freq) > sig) 
+  #sort by highest correlation
+  corr <- corr[order(-abs(corr$Freq)),] 
+  #print table
+  print(corr)
+  #turn corr back into matrix in order to plot with corrplot
+  mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+  
+  #plot correlations visually
+  corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ")
+}
+corr_simple(df_m)
+
+corrplot(corr, tl.col = "brown", tl.srt = 30, bg = "White",
+         title = "\n\n Correlation Plot Of KPIs",
+         type = "upper")
+```
+
+
+## Optimal # of Clusters
+
+```{r}
+distance <- get_dist(df_m)
+fviz_dist(distance, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+```
+```{r}
+set.seed(123)
+
+fviz_nbclust(df_m, kmeans, method = "wss")
+```
+
+
+```{r}
+fviz_nbclust(df_m, kmeans, method = "silhouette")
+```
+
+
+```{r}
+gap_stat <- cluster::clusGap(df_m, FUN = kmeans, nstart = 25,
+                    K.max = 10, B = 50)
+fviz_gap_stat(gap_stat)
+```
+```{r}
+res <- NbClust::NbClust(df_m, distance = "euclidean", min.nc=2, max.nc=10, 
+            method = "kmeans", index = "ch")
+            
+res$All.index
+res$Best.nc
+res$Best.partition
+```
+```{r}
+fviz_nbclust(res)
+```
+## K-Means Cluster
+
+```{r}
+clusters <- kmeans(df_m, 4)
+```
+
+```{r}
+fviz_cluster(clusters, data = df_m) +
+  theme_minimal()
+```
+```{r}
+results <- df_m %>%
+  mutate(Cluster = clusters$cluster)
+
+results_s <- df_m %>%
+  mutate(Cluster = clusters$cluster) %>%
+  group_by(Cluster) %>%
+  summarise_all("median")
+```
+
+```{r}
+write.csv(results, "results.csv")
+write.csv(results_s, "summarizedresults.csv")
+```
+
+## Hierarchical Cluster
+
+```{r}
+hresults <- hclust(dist(df_m))
+plot(hresults)
+```
+```{r}
+cutree(hresults, 6)
+```
+
+```{r}
+hresults2 <- hclust(dist(df_m), method = 'average')
+plot(hresults2)
+```
+
+```{r}
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+
+# function to compute coefficient
+ac <- function(x) {
+  agnes(df_m, method = x)$ac
+}
+
+map_dbl(m, ac)
+```
+```{r}
+hc3 <- agnes(df_m, method = "ward")
+pltree(hc3, cex = 0.6, hang = -1, main = "Dendrogram of agnes") 
+```
+```{r}
+# Ward's method
+hc5 <- hclust(dist(df_m), method = "ward.D2" )
+
+# Cut tree into 4 groups
+sub_grp <- cutree(hc5, k = 6)
+
+# Number of members in each cluster
+table(sub_grp)
+```
+
+```{r}
+df_m %>%
+  mutate(cluster = sub_grp)
+```
+
